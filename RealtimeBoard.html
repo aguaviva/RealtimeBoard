@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title>WebSockets - Collaborative  whiteboard with chat</title>
+        <style>
+        * { font-family:tahoma; font-size:12px; padding:0px; margin:0px; }
+        p { line-height:18px; }
+        div { width:500px; margin-left:auto; margin-right:auto;}
+        #content { padding:5px; background:#ddd; border-radius:5px; overflow-y: scroll;
+                   border:1px solid #CCC; margin-top:10px; height: 160px; }
+        #input { border-radius:2px; border:1px solid #ccc;
+                 margin-top:10px; padding:5px; width:400px;  }
+        #status { width:88px; display:block; float:left; margin-top:15px; }
+        </style>
+        <script src="//ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js"></script>
+        <script>
+            $(function () 
+            {
+                "use strict";
+            
+                // for better performance - to avoid searching in DOM
+                var content = $('#content');
+                var input   = $('#input');
+                var status  = $('#status');
+            
+                var myName = false;  // my name sent to the server
+            
+                ///////////////////////////////////////////////////////////////////////////////
+                // Add message to chat window
+                
+                function addMessage(author, message, color, dt) 
+                {
+                    content.prepend(
+                        '<p><span style="color:' + color + '">' + author + '</span> @ ' +
+                        + (dt.getHours() < 10 ? '0' + dt.getHours() : dt.getHours()) + ':'
+                        + (dt.getMinutes() < 10 ? '0' + dt.getMinutes() : dt.getMinutes())
+                        + ': ' + message + '</p>');
+                }
+            
+                ///////////////////////////////////////////////////////////////////////////////
+                // Add strokes to whiteboar window
+                
+                function Graph(canvas)
+                {
+                    var ctx = canvas.getContext('2d');
+                     
+                    var painting = document.getElementById('paint');
+                    var paint_style = getComputedStyle(painting);
+                    canvas.width = parseInt(paint_style.getPropertyValue('width'));
+                    canvas.height = parseInt(paint_style.getPropertyValue('height'));
+            
+                    ctx.lineWidth = 3;
+                    ctx.lineJoin = 'round';
+                    ctx.lineCap = 'round';
+                    
+                    var strokes = {}
+            
+                    this.penDown = function(color)
+                    {
+                        strokes[color]=false;
+                    }
+            
+                    this.penMove = function(color, x,y)
+                    {
+                        var pos = strokes[color];
+                        if (pos === false)
+                        {
+                            strokes[color] = [x,y];
+                        }
+                        else
+                        {
+                            ctx.beginPath();
+                            ctx.strokeStyle = color;
+                            ctx.moveTo(pos.x, pos.y);
+                            ctx.lineTo(x, y);
+                            ctx.stroke();
+                            strokes[color].x = x;
+                            strokes[color].y = y;
+                        }
+                    }
+            
+                    this.penUp = function(color)
+                    {
+                        strokes[color] = false;
+                    }
+                    
+                    this.setData = function(blob)
+                    {
+                        var img = new Image();
+                        img.onload = function() { ctx.drawImage(img, 0, 0) }
+                        img.src = URL.createObjectURL(blob);            
+                    }
+                }
+            
+                ///////////////////////////////////////////////////////////////////////////////
+                // Websockets initialization and management
+                
+                function WebsocketServer(canvas)
+                {
+                    // if user is running mozilla then use it's built-in WebSocket
+                    window.WebSocket = window.WebSocket || window.MozWebSocket;
+                
+                    // if browser doesn't support WebSocket, just show some notification and exit
+                    if (!window.WebSocket) 
+                    {
+                        content.html($('<p>', { text: 'Sorry, but your browser doesn\'t support WebSockets.'} ));
+                        input.hide();
+                        $('span').hide();
+                        return;
+                    }
+                
+                    // open connection
+                    var connection = new WebSocket('ws://' + location.host + '/wsapp/');
+                
+                    this.sendData = function(type, data)
+                    {
+                        connection.send(JSON.stringify( { type: type, data: data} ));
+                    }
+                
+                    connection.onopen = function () 
+                    {
+                        // first we want users to enter their names
+                        input.removeAttr('disabled');
+                        status.html('<b>Choose name first!:</b>');
+                    };
+                
+                    connection.onerror = function (error) 
+                    {
+                        content.html($('<p>', { text: 'Sorry, but there\'s some problem with your connection or the server is down.' } ));
+                    };
+                
+                    // most important part - incoming messages
+                    connection.onmessage = function (message) 
+                    {
+                        try 
+                        {
+                            if (typeof message.data === "string")
+                            {            
+                                var json = JSON.parse(message.data);
+                    
+                                if (json.type === 'color') 
+                                { 
+                                    status.text(myName + ': ').css('color', json.data);
+                                    input.removeAttr('disabled').focus();
+                                } 
+                                else if (json.type === 'history') 
+                                { 
+                                    for (var i=0; i < json.data.length; i++) 
+                                    {
+                                        addMessage(json.data[i].author, json.data[i].text, json.data[i].color, new Date(json.data[i].time));
+                                    }
+                                } 
+                                else if (json.type === 'chat') 
+                                { 
+                                    input.removeAttr('disabled'); // let the user write another message
+                                    input.focus();
+                                    addMessage(json.author, json.text, json.color, new Date(json.time));
+                                } 
+                                else if (json.type === 'mouse') 
+                                {
+                                    var data = json.text.split(",");
+                                    var x = parseInt(data[0]);
+                                    var y = parseInt(data[1]);
+                                    switch(json.text)
+                                    {
+                                        case "true":  graph.penDown(json.color, x, y); break;
+                                        case "false": graph.penUp(json.color); break;
+                                        default: graph.penMove(json.color, x, y);
+                                    }
+                                }
+                                else if (json.type === 'getCanvas') 
+                                {
+                                    //server is asking us for the contents of the whiteboard
+                                    canvas.toBlob(function(blob) { connection.send(blob); }, 'image/png');
+                                }
+                                else
+                                {
+                                    console.log('Hmm..., I\'ve never seen JSON like this: ', json);
+                                }
+                            }
+                            else if (typeof message.data === "object")
+                            {
+                                //we got the contents of the whiteboard, update the canvas
+                                graph.setData(message.data);
+                            }
+                        } 
+                        catch (e) 
+                        {
+                            console.log('Error processing  received data: ', message.data);
+                            return;
+                        }
+                
+                    };
+                    
+                    // show and error if the if the server wasn't able to respond in 3 seconds
+                    setInterval(function() 
+                    {
+                        if (connection.readyState !== 1) 
+                        {
+                            status.text('Error');
+                            input.attr('disabled', 'disabled').val('Unable to comminucate with the WebSocket server.');
+                        }
+                    }, 3000);
+                }
+            
+                ///////////////////////////////////////////////////////////////////////////////
+                // Input handler
+                function StartKeyboardHandler(canvas, server)
+                {
+                    input.keydown(function(e) 
+                    {
+                        if (e.keyCode === 13) 
+                        {
+                            var msg = $(this).val();
+                            if (!msg) 
+                            {
+                                return;
+                            }
+                            
+                            // send the message as an ordinary text
+                            server.sendData("chat", msg);
+                            
+                            $(this).val('');
+                            input.attr('disabled', 'disabled');
+                
+                            // we know that the first message sent from a user their name
+                            if (myName === false) 
+                            {
+                                myName = msg;
+                                startMouseHandler(canvas, server);
+                            }
+                        }
+                    });
+                }
+                
+                ///////////////////////////////////////////////////////////////////////////////
+                // Mouse handler (started from the keyboard handler, once we have registered a username)
+
+                function startMouseHandler(canvas, server)
+                {
+                    var mouse = {x: 0, y: 0};
+                
+                    canvas.addEventListener('mousemove', function(e) 
+                    {
+                        mouse.x = e.pageX - this.offsetLeft;
+                        mouse.y = e.pageY - this.offsetTop;
+                    }, false);
+                    
+                    canvas.addEventListener('mousedown', function(e) 
+                    {
+                        server.sendData("mouse", "true");
+                        canvas.addEventListener('mousemove', onPaint, false);
+                    }, false);
+                     
+                    canvas.addEventListener('mouseup', function() 
+                    {
+                        server.sendData("mouse", "false");
+                        canvas.removeEventListener('mousemove', onPaint, false);
+                    }, false);
+                     
+                    var onPaint = function() 
+                    {
+                        server.sendData("mouse", ""+mouse.x + "," + mouse.y);
+                    };
+                }
+                
+                var canvas = document.getElementById('myCanvas');
+                var graph = new Graph(canvas);
+                var server = new WebsocketServer(canvas);
+                StartKeyboardHandler(canvas, server);
+            });
+            
+        </script>
+    </head>
+    <body>
+        <div><h2>Collaborative whiteboard with chat</h2></div>
+      	<div id="paint">
+      		<canvas id="myCanvas" height="400" style="border:1px solid"></canvas>
+    	</div>
+        <div id="content"></div>
+        <div>
+            <span id="status">Connecting...</span>
+            <input type="text" id="input" disabled="disabled" />
+        </div>
+    </body>
+</html>
